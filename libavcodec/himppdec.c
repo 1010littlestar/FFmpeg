@@ -4,6 +4,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/opt.h"
+#include "libavutil/avassert.h"
 #include "libswscale/swscale.h"
 
 #include "avcodec.h"
@@ -35,6 +36,13 @@
 
 #include <sample_comm.h>
 
+typedef struct HiMppHwFrameContext {
+    VIDEO_FRAME_INFO_S frame_info;
+    HI_U8* frame_addr;
+    HI_U32 size;
+    HI_U32 channel;
+} HiMppHwFrameContext;
+
 typedef struct HiMppContext{
     AVClass *class;
 
@@ -42,8 +50,30 @@ typedef struct HiMppContext{
     int vdec_chn_total;
 
     int hdmi_output_enable;
+
+    // TODO(qiasx): 存储硬件地址映射的帧,
+    //AVFifoBuffer *frame_queue;
+    //int nb_surfaces
 } HiMppContext;
 
+static void hi_hwframe_ctx_free(void *opaque, uint8_t *data)
+{
+    HiMppHwFrameContext *ctx = (HiMppHwFrameContext *)data;
+
+    if (ctx->frame_addr != NULL && ctx->size != 0) {
+        HI_MPI_SYS_Munmap(ctx->frame_addr, ctx->size);
+        ctx->frame_addr = NULL;
+        ctx->size = 0;
+    }
+
+    if (-1 != ctx->channel && NULL != (HI_U8 *)ctx->frame_info.stVFrame.u64PhyAddr[0]) {
+        HI_MPI_VDEC_ReleaseFrame(ctx->channel, &ctx->frame_info);
+    }
+
+    av_free(data);
+
+    return;
+}
 
 static av_cold int hi_decode_init(AVCodecContext *avctx)
 {
@@ -230,7 +260,7 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
             goto END7;
         }
     }
-
+                         
     return 0;
 
 END7:
@@ -276,17 +306,71 @@ END1:
     return -1;
 }
 
-static int hi_decode_frame(AVCodecContext *avctx, void *data, 
+#define MAX_FRM_WIDTH   16384
+// 参考mpp sample_yuv_8bit_dump() 
+// TODO(qiaosx): 由于时间紧迫，存在一次内存拷贝，后续需要优化
+static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx)
+{
+    HI_U64 PhyAddr = 0;
+    HI_U32 u32Size = 0;
+    HI_CHAR *pUserAddr = NULL;
+    PIXEL_FORMAT_E  enPixelFormat = ctx->frame_info.stVFrame.enPixelFormat;
+    VIDEO_FORMAT_E  enVideoFormat = ctx->frame_info.stVFrame.enVideoFormat;
+    VIDEO_FRAME_S* pVBuf = &ctx->frame_info.stVFrame;
+
+    // 强制解码模块输出了格式为yuv420
+    if (PIXEL_FORMAT_YVU_SEMIPLANAR_420 != enPixelFormat) {
+        av_log(NULL, AV_LOG_ERROR, "pixel format isn't yuv420");
+        return AVERROR(EAGAIN);
+    }
+
+    if (VIDEO_FORMAT_TILE_64x16 != enVideoFormat) {
+        av_log(NULL, AV_LOG_ERROR, "vidoe format isn't VIDEO_FORMAT_TILE_64x16");
+        return AVERROR(EAGAIN);
+    }
+
+    u32Size = (pVBuf->u32Stride[0]) * (pVBuf->u32Height);
+    PhyAddr = pVBuf->u64PhyAddr[0];
+
+    pUserAddr = (HI_CHAR*) HI_MPI_SYS_Mmap(PhyAddr, u32Size);
+    if (HI_NULL == pUserAddr)
+    {
+        av_log(NULL, AV_LOG_ERROR, "HI_MPI_SYS_Mmap size %d failed", u32Size);
+        return AVERROR(EAGAIN);
+    }
+
+
+    // 用于hw frame释放回收资源
+    ctx->frame_addr = pUserAddr;
+    ctx->size = u32Size;
+
+    return 0;
+}
+
+static int hi_decode(AVCodecContext *avctx, void *data, 
                           int *got_frame, AVPacket *avpkt)
 {
     HI_S32 s32Ret = HI_SUCCESS;
 
+    VDEC_CHN channel = avpkt->stream_index;
     VDEC_STREAM_S stStream;
+    AVFrame *frame = (AVFrame *)data;
+    HiMppHwFrameContext *hwframe_ctx = NULL;
+    VIDEO_FRAME_INFO_S *frame_info = NULL;
 
-    //HiMppContext *ctx = avctx->priv_data;
 
+    hwframe_ctx = av_mallocz(sizeof(HiMppHwFrameContext));
+    if (!hwframe_ctx) {
+        av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
+        s32Ret = AVERROR(ENOMEM);
+        return s32Ret;
+    }
+
+    hwframe_ctx->channel = channel;
+
+                 
     av_log(avctx, AV_LOG_TRACE, "hi_decode_frame: chn: %d, width:%d, height:%d, pts:%ld, size:%u\n", 
-           avpkt->stream_index, avctx->width, avctx->height, avpkt->pts, avpkt->size);
+           channel, avctx->width, avctx->height, avpkt->pts, avpkt->size);
     stStream.u64PTS       = avpkt->pts;
     stStream.pu8Addr      = avpkt->data;
     stStream.u32Len       = avpkt->size;
@@ -294,16 +378,56 @@ static int hi_decode_frame(AVCodecContext *avctx, void *data,
     stStream.bEndOfStream = !avpkt->data ? HI_TRUE : HI_FALSE;
     stStream.bDisplay     = 1;
 
-    s32Ret = HI_MPI_VDEC_SendStream(avpkt->stream_index, &stStream, 0);
-    if((HI_SUCCESS != s32Ret))
-    {
-      av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VDEC_SendStream fail for %#x!\n", s32Ret);
+    s32Ret = HI_MPI_VDEC_SendStream(channel, &stStream, 0);
+    if((HI_SUCCESS != s32Ret)) {
+        av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VDEC_SendStream fail for %#x!\n", s32Ret);
+        return AVERROR(EAGAIN);
     }
 
+    frame_info = &hwframe_ctx->frame_info;
+    s32Ret = HI_MPI_VDEC_GetFrame(channel, frame_info, -1);
+    if (s32Ret != HI_SUCCESS) {
+        av_log(avctx, AV_LOG_ERROR, "hi mpi vdec get frame failed\n");
+        s32Ret = AVERROR(EAGAIN);
+        goto error;
+    }
+
+    /* TODO(qiaosx): 
+     * 解码使用hwaccel, 解决数据硬件地址空间与用户空间的映射, 暂时使用临时方案解决
+     * */
+    s32Ret = ff_get_buffer(avctx, frame, 0);
+    if (s32Ret < 0) {
+        av_log(avctx, AV_LOG_ERROR, "ff_get_buffer failed\n");
+        goto error;
+    }
+
+    frame->width = avctx->width;
+    frame->height = avctx->height;
+    frame->pkt_pos = -1;
+    frame->pkt_duration = 0;
+    frame->pkt_size = -1;
+    frame->hw_frames_ctx = av_buffer_create((uint8_t*)hwframe_ctx, sizeof(HiMppHwFrameContext), hi_hwframe_ctx_free, NULL, 0);
+    if (!frame->hw_frames_ctx) {
+        av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
+        goto error;
+    }
+
+    hi_video_frame_transfer_data(hwframe_ctx);
+
+    frame->data[0] = hwframe_ctx->frame_addr;
+    frame->linesize[0] = hwframe_ctx->size;
+
+    *got_frame = 1;
+
+    return 0;
+
+error:
+    av_free(hwframe_ctx);
     return s32Ret;
 }
 
-static av_cold int hi_decode_close(AVCodecContext *avctx)
+/*
+static int hi_release_mpp(AVCodecContext *avctx)
 {
     HI_BOOL abChnEnable[VPSS_MAX_CHN_NUM];
     HiMppContext *ctx = avctx->priv_data;
@@ -312,8 +436,6 @@ static av_cold int hi_decode_close(AVCodecContext *avctx)
     SAMPLE_VO_CONFIG_S stVoConfig;
     HI_S32 s32Ret = HI_SUCCESS;
     int i;
-
-    return 0;
 
     memset(&stVoConfig, 0, sizeof(stVoConfig));
     stVoConfig.VoDev                 = SAMPLE_VO_DEV_UHD;
@@ -358,6 +480,13 @@ static av_cold int hi_decode_close(AVCodecContext *avctx)
 
     return 0;
 }
+*/
+
+static int hi_decode_close(AVCodecContext *avctx) {
+
+    return 0;
+}
+
 
 
 #define OFFSET(x) offsetof(HiMppContext, x)
@@ -383,11 +512,17 @@ AVCodec ff_h264_himpp_decoder = {
     .id             = AV_CODEC_ID_H264,
     .priv_data_size = sizeof(HiMppContext),
     .priv_class     = &himpp_class,
+
     .init           = hi_decode_init,
-    .decode         = hi_decode_frame,
+    .decode         = hi_decode,
+    .flush          = NULL,
     .close          = hi_decode_close,
+
+    .bsfs           = "h264_mp4toannexb",
+
     .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_DR1,
     .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS | FF_CODEC_CAP_INIT_THREADSAFE |
                       FF_CODEC_CAP_INIT_CLEANUP,
+    .pix_fmts       = (const enum AVPixelFormat[]) {AV_PIX_FMT_YUV420P},
     .wrapper_name   = "himpp",
 };
