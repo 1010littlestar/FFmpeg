@@ -67,6 +67,7 @@ static void hi_hwframe_ctx_free(void *opaque, uint8_t *data)
     }
 
     if (-1 != ctx->channel && NULL != (HI_U8 *)ctx->frame_info.stVFrame.u64PhyAddr[0]) {
+        av_log(NULL, AV_LOG_TRACE, "free VIDEO_FRAME_INFO_S\n");
         HI_MPI_VDEC_ReleaseFrame(ctx->channel, &ctx->frame_info);
     }
 
@@ -98,13 +99,14 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
 
     avctx->width = 1920;
     avctx->height = 1080;
+    avctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-    av_log(avctx, AV_LOG_DEBUG, "hi_decode_init");
+    av_log(avctx, AV_LOG_DEBUG, "hi_decode_init\n");
 
     /* 判断解码模块是否使能 */
     s32Ret = HI_MPI_VDEC_GetChnAttr(0, &stVdecChnAttr);
     if (0 == s32Ret) {
-        av_log(avctx, AV_LOG_DEBUG, "himpp has init");
+        av_log(avctx, AV_LOG_DEBUG, "himpp has init\n");
         return 0;
     }
 
@@ -113,7 +115,7 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     s32Ret =  SAMPLE_COMM_SYS_GetPicSize(enDispPicSize, &stDispSize);
     if(s32Ret != HI_SUCCESS)
     {
-        av_log(avctx, AV_LOG_DEBUG, "sys get pic size fail for %#x!", s32Ret);
+        av_log(avctx, AV_LOG_DEBUG, "sys get pic size fail for %#x!\n", s32Ret);
         goto END1;
     }
 
@@ -128,7 +130,7 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     s32Ret = SAMPLE_COMM_SYS_Init(&stVbConfig);
     if(s32Ret != HI_SUCCESS)
     {
-        av_log(avctx, AV_LOG_DEBUG, "init sys fail for %#x!", s32Ret);
+        av_log(avctx, AV_LOG_DEBUG, "init sys fail for %#x!\n", s32Ret);
         goto END1;
     }
 
@@ -167,7 +169,8 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     avctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
     // 如果使能hdmi显示，则进行VPSS->VO->HDMI处理，只显示vdec的前8个通道数据
-    if (!ctx->hdmi_output_enable) {
+    if (0 == ctx->hdmi_output_enable) {
+        av_log(avctx, AV_LOG_DEBUG, "stop hdmi display");
         return 0;
     }
 
@@ -320,16 +323,16 @@ static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx)
 
     // 强制解码模块输出了格式为yuv420
     if (PIXEL_FORMAT_YVU_SEMIPLANAR_420 != enPixelFormat) {
-        av_log(NULL, AV_LOG_ERROR, "pixel format isn't yuv420");
+        av_log(NULL, AV_LOG_ERROR, "pixel format isn't yuv420\n");
         return AVERROR(EAGAIN);
     }
 
     if (VIDEO_FORMAT_TILE_64x16 != enVideoFormat) {
-        av_log(NULL, AV_LOG_ERROR, "vidoe format isn't VIDEO_FORMAT_TILE_64x16");
+        av_log(NULL, AV_LOG_ERROR, "vidoe format isn't VIDEO_FORMAT_TILE_64x16\n");
         return AVERROR(EAGAIN);
     }
 
-    u32Size = (pVBuf->u32Stride[0]) * (pVBuf->u32Height);
+    u32Size = (pVBuf->u32Stride[0]) * (pVBuf->u32Height) * 3 / 2;
     PhyAddr = pVBuf->u64PhyAddr[0];
 
     pUserAddr = (HI_CHAR*) HI_MPI_SYS_Mmap(PhyAddr, u32Size);
@@ -369,28 +372,45 @@ static int hi_decode(AVCodecContext *avctx, void *data,
     hwframe_ctx->channel = channel;
 
                  
-    av_log(avctx, AV_LOG_TRACE, "hi_decode_frame: chn: %d, width:%d, height:%d, pts:%ld, size:%u\n", 
-           channel, avctx->width, avctx->height, avpkt->pts, avpkt->size);
-    stStream.u64PTS       = avpkt->pts;
-    stStream.pu8Addr      = avpkt->data;
-    stStream.u32Len       = avpkt->size;
-    stStream.bEndOfFrame  = HI_TRUE;
-    stStream.bEndOfStream = !avpkt->data ? HI_TRUE : HI_FALSE;
+    av_log(avctx, AV_LOG_TRACE, "hi_decode_frame: chn: %d, width:%d, height:%d, pts:%ld, size:%u, buf: %p\n", 
+           channel, avctx->width, avctx->height, avpkt->pts, avpkt->size, avpkt->buf);
+    if (NULL == avpkt->buf) {
+        stStream.pu8Addr      = NULL;
+        stStream.u32Len       = 0;
+        stStream.bEndOfFrame  = HI_TRUE;
+        stStream.bEndOfStream = HI_TRUE;
+    }
+    else {
+        stStream.pu8Addr      = avpkt->data;
+        stStream.u32Len       = avpkt->size;
+        stStream.bEndOfFrame  = HI_TRUE;
+        stStream.bEndOfStream = !avpkt->data ? HI_TRUE : HI_FALSE;
+    }
+    stStream.u64PTS       = 0;
     stStream.bDisplay     = 1;
 
-    s32Ret = HI_MPI_VDEC_SendStream(channel, &stStream, 0);
-    if((HI_SUCCESS != s32Ret)) {
+    s32Ret = HI_MPI_VDEC_SendStream(channel, &stStream, -1);
+    if((HI_SUCCESS != s32Ret) && (s32Ret != HI_ERR_VDEC_BUF_FULL)) {
         av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VDEC_SendStream fail for %#x!\n", s32Ret);
         return AVERROR(EAGAIN);
     }
 
+    if (s32Ret == HI_ERR_VDEC_BUF_FULL) {
+        av_log(avctx, AV_LOG_TRACE, "vdec buf full, send stream failed.\n");
+    }
+    else {
+        av_log(avctx, AV_LOG_TRACE, "vdec send stream success.\n");
+    }
+
     frame_info = &hwframe_ctx->frame_info;
-    s32Ret = HI_MPI_VDEC_GetFrame(channel, frame_info, -1);
+    s32Ret = HI_MPI_VDEC_GetFrame(channel, frame_info, 0);
     if (s32Ret != HI_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "hi mpi vdec get frame failed\n");
+        av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VDEC_GetFrame fail for %#x!\n", s32Ret);
         s32Ret = AVERROR(EAGAIN);
         goto error;
     }
+
+    av_log(avctx, AV_LOG_TRACE, "+++++++++++++++++++++get a frame+++++++++++++++++\n");
 
     /* TODO(qiaosx): 
      * 解码使用hwaccel, 解决数据硬件地址空间与用户空间的映射, 暂时使用临时方案解决
@@ -411,6 +431,8 @@ static int hi_decode(AVCodecContext *avctx, void *data,
         av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
         goto error;
     }
+
+    av_log(avctx, AV_LOG_TRACE, "begin transfer data\n");
 
     hi_video_frame_transfer_data(hwframe_ctx);
 
@@ -517,8 +539,6 @@ AVCodec ff_h264_himpp_decoder = {
     .decode         = hi_decode,
     .flush          = NULL,
     .close          = hi_decode_close,
-
-    .bsfs           = "h264_mp4toannexb",
 
     .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_DR1,
     .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS | FF_CODEC_CAP_INIT_THREADSAFE |
