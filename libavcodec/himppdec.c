@@ -46,9 +46,6 @@ typedef struct HiMppHwFrameContext {
 typedef struct HiMppContext{
     AVClass *class;
 
-    int vdec_chn_using;
-    int vdec_chn_total;
-
     int hdmi_output_enable;
 
     // TODO(qiasx): 存储硬件地址映射的帧,
@@ -68,7 +65,7 @@ static void hi_hwframe_ctx_free(void *opaque, uint8_t *data)
 
     if (-1 != ctx->channel && NULL != (HI_U8 *)ctx->frame_info.stVFrame.u64PhyAddr[0]) {
         av_log(NULL, AV_LOG_TRACE, "free VIDEO_FRAME_INFO_S\n");
-        HI_MPI_VDEC_ReleaseFrame(ctx->channel, &ctx->frame_info);
+        HI_MPI_VPSS_ReleaseChnFrame(ctx->channel, 0, &ctx->frame_info);
     }
 
     av_free(data);
@@ -87,7 +84,7 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     SAMPLE_VO_CONFIG_S stVoConfig;
 
     HI_S32 s32Ret = HI_SUCCESS;
-    HI_U32 u32VdecChnNum = ctx->vdec_chn_total;
+    HI_U32 u32VdecChnNum = 8;
     HI_U32 VpssGrpNum = 8;
     PIC_SIZE_E enDispPicSize;
     SIZE_S stDispSize;
@@ -126,7 +123,7 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     stVbConfig.u32MaxPoolCnt             = 1;
     stVbConfig.astCommPool[0].u32BlkCnt  = 10 * u32VdecChnNum;
     stVbConfig.astCommPool[0].u64BlkSize = COMMON_GetPicBufferSize(stDispSize.u32Width, stDispSize.u32Height,
-                                                PIXEL_FORMAT_YVU_SEMIPLANAR_420, DATA_BITWIDTH_8, COMPRESS_MODE_SEG, 0);
+                                                PIXEL_FORMAT_YVU_SEMIPLANAR_420, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, 0);
     s32Ret = SAMPLE_COMM_SYS_Init(&stVbConfig);
     if(s32Ret != HI_SUCCESS)
     {
@@ -189,13 +186,13 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     abChnEnable[0] = HI_TRUE;
     astVpssChnAttr[0].u32Width                    = stDispSize.u32Width;
     astVpssChnAttr[0].u32Height                   = stDispSize.u32Height;
-    astVpssChnAttr[0].enChnMode                   = VPSS_CHN_MODE_AUTO;
-    astVpssChnAttr[0].enCompressMode              = COMPRESS_MODE_SEG;
+    astVpssChnAttr[0].enChnMode                   = VPSS_CHN_MODE_USER;
+    astVpssChnAttr[0].enCompressMode              = COMPRESS_MODE_NONE;
     astVpssChnAttr[0].enDynamicRange              = DYNAMIC_RANGE_SDR8;
     astVpssChnAttr[0].enPixelFormat               = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
     astVpssChnAttr[0].stFrameRate.s32SrcFrameRate = -1;
     astVpssChnAttr[0].stFrameRate.s32DstFrameRate = -1;
-    astVpssChnAttr[0].u32Depth                    = 0;
+    astVpssChnAttr[0].u32Depth                    = 2;
     astVpssChnAttr[0].bMirror                     = HI_FALSE;
     astVpssChnAttr[0].bFlip                       = HI_FALSE;
     astVpssChnAttr[0].stAspectRatio.enMode        = ASPECT_RATIO_NONE;
@@ -309,9 +306,10 @@ END1:
     return -1;
 }
 
-#define MAX_FRM_WIDTH   16384
-// 参考mpp sample_yuv_8bit_dump() 
-// TODO(qiaosx): 由于时间紧迫，存在一次内存拷贝，后续需要优化
+
+// 参考mpp sample_yuv_8bit_dump(), 
+// VPSS必须使用VIDEO_FORMAT_LINEAR 用户才能调用opencv解析yuv
+// TODO(qiaosx): 添加多种格式的输出支持
 static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx)
 {
     HI_U64 PhyAddr = 0;
@@ -319,6 +317,7 @@ static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx)
     HI_CHAR *pUserAddr = NULL;
     PIXEL_FORMAT_E  enPixelFormat = ctx->frame_info.stVFrame.enPixelFormat;
     VIDEO_FORMAT_E  enVideoFormat = ctx->frame_info.stVFrame.enVideoFormat;
+    DYNAMIC_RANGE_E enDynamicRange = ctx->frame_info.stVFrame.enDynamicRange;
     VIDEO_FRAME_S* pVBuf = &ctx->frame_info.stVFrame;
 
     // 强制解码模块输出了格式为yuv420
@@ -327,8 +326,13 @@ static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx)
         return AVERROR(EAGAIN);
     }
 
-    if (VIDEO_FORMAT_TILE_64x16 != enVideoFormat) {
-        av_log(NULL, AV_LOG_ERROR, "vidoe format isn't VIDEO_FORMAT_TILE_64x16\n");
+    if (VIDEO_FORMAT_LINEAR != enVideoFormat) {
+        av_log(NULL, AV_LOG_ERROR, "video format isn't VIDEO_FORMAT_LINE, %d\n", enVideoFormat);
+        return AVERROR(EAGAIN);
+    }
+
+    if (DYNAMIC_RANGE_SDR8 != enDynamicRange) {
+        av_log(NULL, AV_LOG_ERROR, "video enDynamicRange isn't DYNAMIC_RANGE_SDR8, %d\n", enDynamicRange);
         return AVERROR(EAGAIN);
     }
 
@@ -395,23 +399,6 @@ static int hi_decode(AVCodecContext *avctx, void *data,
         return AVERROR(EAGAIN);
     }
 
-    if (s32Ret == HI_ERR_VDEC_BUF_FULL) {
-        av_log(avctx, AV_LOG_TRACE, "vdec buf full, send stream failed.\n");
-    }
-    else {
-        av_log(avctx, AV_LOG_TRACE, "vdec send stream success.\n");
-    }
-
-    frame_info = &hwframe_ctx->frame_info;
-    s32Ret = HI_MPI_VDEC_GetFrame(channel, frame_info, 0);
-    if (s32Ret != HI_SUCCESS) {
-        av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VDEC_GetFrame fail for %#x!\n", s32Ret);
-        s32Ret = AVERROR(EAGAIN);
-        goto error;
-    }
-
-    av_log(avctx, AV_LOG_TRACE, "+++++++++++++++++++++get a frame+++++++++++++++++\n");
-
     /* TODO(qiaosx): 
      * 解码使用hwaccel, 解决数据硬件地址空间与用户空间的映射, 暂时使用临时方案解决
      * */
@@ -432,7 +419,21 @@ static int hi_decode(AVCodecContext *avctx, void *data,
         goto error;
     }
 
-    av_log(avctx, AV_LOG_TRACE, "begin transfer data\n");
+
+    /* 由于hi3559av100的VDEC输出只支持VIDEO_FORMAT_TILE_64x16格式，
+     * 所以从VPSS中获取VIDEO_FORMAT_LINEAR格式的数据用于解析
+     */
+    frame_info = &hwframe_ctx->frame_info;
+    memset(frame_info, 0, sizeof(*frame_info));
+    frame_info->u32PoolId = VB_INVALID_POOLID;
+    s32Ret = HI_MPI_VPSS_GetChnFrame(channel, 0, frame_info, 0);
+    if (s32Ret != HI_SUCCESS) {
+        av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VPSS_GetChnFrame fail for %#x!\n", s32Ret);
+        s32Ret = AVERROR(EAGAIN);
+        goto error;
+    }
+
+    av_log(avctx, AV_LOG_TRACE, "Got a himpp frame!\n");
 
     hi_video_frame_transfer_data(hwframe_ctx);
 
@@ -514,8 +515,6 @@ static int hi_decode_close(AVCodecContext *avctx) {
 #define OFFSET(x) offsetof(HiMppContext, x)
 #define VD AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
-    { "VdecChnUsing", "Send pkt to Vdec channel", OFFSET(vdec_chn_using), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 7, VD },
-    { "VdecChnTotal", "Vdec channel total", OFFSET(vdec_chn_total), AV_OPT_TYPE_INT, { .i64 = 8 }, 0, 8, VD },
     { "HdmiOutput", "hdmi display", OFFSET(hdmi_output_enable), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VD },
     { NULL },
 };
