@@ -190,8 +190,8 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     astVpssChnAttr[0].enCompressMode              = COMPRESS_MODE_NONE;
     astVpssChnAttr[0].enDynamicRange              = DYNAMIC_RANGE_SDR8;
     astVpssChnAttr[0].enPixelFormat               = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
-    astVpssChnAttr[0].stFrameRate.s32SrcFrameRate = -1;
-    astVpssChnAttr[0].stFrameRate.s32DstFrameRate = -1;
+    astVpssChnAttr[0].stFrameRate.s32SrcFrameRate = 25;
+    astVpssChnAttr[0].stFrameRate.s32DstFrameRate = 2;
     astVpssChnAttr[0].u32Depth                    = 2;
     astVpssChnAttr[0].bMirror                     = HI_FALSE;
     astVpssChnAttr[0].bFlip                       = HI_FALSE;
@@ -310,7 +310,7 @@ END1:
 // 参考mpp sample_yuv_8bit_dump(), 
 // VPSS必须使用VIDEO_FORMAT_LINEAR 用户才能调用opencv解析yuv
 // TODO(qiaosx): 添加多种格式的输出支持
-static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx)
+static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx, AVFrame *frame)
 {
     HI_U64 PhyAddr = 0;
     HI_U32 u32Size = 0;
@@ -346,6 +346,11 @@ static int hi_video_frame_transfer_data(HiMppHwFrameContext *ctx)
         return AVERROR(EAGAIN);
     }
 
+    frame->data[0] = pUserAddr;
+    frame->linesize[0] = u32Size;
+    //frame->linesize[0] = pVBuf->u32Stride[0];
+    //frame->data[1] = pUserAddr + (pVBuf->u32Stride[0]) * (pVBuf->u32Height);
+    //frame->linesize[1] = pVBuf->u32Stride[1];
 
     // 用于hw frame释放回收资源
     ctx->frame_addr = pUserAddr;
@@ -363,7 +368,7 @@ static int hi_decode(AVCodecContext *avctx, void *data,
     VDEC_STREAM_S stStream;
     AVFrame *frame = (AVFrame *)data;
     HiMppHwFrameContext *hwframe_ctx = NULL;
-    VIDEO_FRAME_INFO_S *frame_info = NULL;
+    VIDEO_FRAME_INFO_S tmp_frame;
 
 
     hwframe_ctx = av_mallocz(sizeof(HiMppHwFrameContext));
@@ -405,7 +410,7 @@ static int hi_decode(AVCodecContext *avctx, void *data,
     s32Ret = ff_get_buffer(avctx, frame, 0);
     if (s32Ret < 0) {
         av_log(avctx, AV_LOG_ERROR, "ff_get_buffer failed\n");
-        goto error;
+        return AVERROR(ENOMEM);
     }
 
     frame->width = avctx->width;
@@ -413,40 +418,33 @@ static int hi_decode(AVCodecContext *avctx, void *data,
     frame->pkt_pos = -1;
     frame->pkt_duration = 0;
     frame->pkt_size = -1;
-    frame->hw_frames_ctx = av_buffer_create((uint8_t*)hwframe_ctx, sizeof(HiMppHwFrameContext), hi_hwframe_ctx_free, NULL, 0);
-    if (!frame->hw_frames_ctx) {
-        av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
-        goto error;
-    }
 
 
     /* 由于hi3559av100的VDEC输出只支持VIDEO_FORMAT_TILE_64x16格式，
      * 所以从VPSS中获取VIDEO_FORMAT_LINEAR格式的数据用于解析
      */
-    frame_info = &hwframe_ctx->frame_info;
-    memset(frame_info, 0, sizeof(*frame_info));
-    frame_info->u32PoolId = VB_INVALID_POOLID;
-    s32Ret = HI_MPI_VPSS_GetChnFrame(channel, 0, frame_info, 0);
+    memset(&tmp_frame, 0, sizeof(tmp_frame));
+    tmp_frame.u32PoolId = VB_INVALID_POOLID;
+    s32Ret = HI_MPI_VPSS_GetChnFrame(channel, 0, &tmp_frame, 0);
     if (s32Ret != HI_SUCCESS) {
         av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VPSS_GetChnFrame fail for %#x!\n", s32Ret);
-        s32Ret = AVERROR(EAGAIN);
-        goto error;
+        return AVERROR(EAGAIN);
     }
 
+    frame->hw_frames_ctx = av_buffer_create((uint8_t*)hwframe_ctx, sizeof(HiMppHwFrameContext), hi_hwframe_ctx_free, NULL, 0);
+    if (!frame->hw_frames_ctx) {
+        av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
+        return AVERROR(ENOMEM);
+    }
+
+    hwframe_ctx->frame_info = tmp_frame;
     av_log(avctx, AV_LOG_TRACE, "Got a himpp frame!\n");
 
-    hi_video_frame_transfer_data(hwframe_ctx);
-
-    frame->data[0] = hwframe_ctx->frame_addr;
-    frame->linesize[0] = hwframe_ctx->size;
+    hi_video_frame_transfer_data(hwframe_ctx, frame);
 
     *got_frame = 1;
 
     return 0;
-
-error:
-    av_free(hwframe_ctx);
-    return s32Ret;
 }
 
 /*
