@@ -81,7 +81,7 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     VPSS_CHN_ATTR_S astVpssChnAttr[VPSS_MAX_CHN_NUM];
     VPSS_GRP_ATTR_S stVpssGrpAttr;
     HI_BOOL abChnEnable[VPSS_MAX_CHN_NUM];
-    SAMPLE_VO_CONFIG_S stVoConfig;
+    //SAMPLE_VO_CONFIG_S stVoConfig;
 
     HI_S32 s32Ret = HI_SUCCESS;
     HI_U32 u32VdecChnNum = 8;
@@ -211,29 +211,29 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     /************************************************
     step5:  start VO
     *************************************************/
-    memset(&stVoConfig, 0, sizeof(stVoConfig));
-    stVoConfig.VoDev                 = SAMPLE_VO_DEV_UHD;
-    stVoConfig.enVoIntfType          = VO_INTF_HDMI;
-    stVoConfig.enIntfSync            = VO_OUTPUT_1080P60;
-    stVoConfig.enPicSize             = enDispPicSize;
-    stVoConfig.u32BgColor            = COLOR_RGB_BLUE;
-    stVoConfig.u32DisBufLen          = 3;
-    stVoConfig.enDstDynamicRange     = DYNAMIC_RANGE_SDR8;
-    stVoConfig.enVoMode              = VO_MODE_8MUX;
-    stVoConfig.enPixFormat           = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
-    stVoConfig.stDispRect.s32X       = 0;
-    stVoConfig.stDispRect.s32Y       = 0;
-    stVoConfig.stDispRect.u32Width   = stDispSize.u32Width;
-    stVoConfig.stDispRect.u32Height  = stDispSize.u32Height;
-    stVoConfig.stImageSize.u32Width  = stDispSize.u32Width;
-    stVoConfig.stImageSize.u32Height = stDispSize.u32Height;
-    stVoConfig.enVoPartMode          = VO_PART_MODE_SINGLE;
-    s32Ret = SAMPLE_COMM_VO_StartVO(&stVoConfig);
-    if(s32Ret != HI_SUCCESS)
-    {
-        av_log(avctx, AV_LOG_DEBUG, "start VO fail for %#x!\n", s32Ret);
-        goto END5;
-    }
+    //memset(&stVoConfig, 0, sizeof(stVoConfig));
+    //stVoConfig.VoDev                 = SAMPLE_VO_DEV_UHD;
+    //stVoConfig.enVoIntfType          = VO_INTF_HDMI;
+    //stVoConfig.enIntfSync            = VO_OUTPUT_1080P60;
+    //stVoConfig.enPicSize             = enDispPicSize;
+    //stVoConfig.u32BgColor            = COLOR_RGB_BLUE;
+    //stVoConfig.u32DisBufLen          = 3;
+    //stVoConfig.enDstDynamicRange     = DYNAMIC_RANGE_SDR8;
+    //stVoConfig.enVoMode              = VO_MODE_8MUX;
+    //stVoConfig.enPixFormat           = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
+    //stVoConfig.stDispRect.s32X       = 0;
+    //stVoConfig.stDispRect.s32Y       = 0;
+    //stVoConfig.stDispRect.u32Width   = stDispSize.u32Width;
+    //stVoConfig.stDispRect.u32Height  = stDispSize.u32Height;
+    //stVoConfig.stImageSize.u32Width  = stDispSize.u32Width;
+    //stVoConfig.stImageSize.u32Height = stDispSize.u32Height;
+    //stVoConfig.enVoPartMode          = VO_PART_MODE_SINGLE;
+    //s32Ret = SAMPLE_COMM_VO_StartVO(&stVoConfig);
+    //if(s32Ret != HI_SUCCESS)
+    //{
+    //    av_log(avctx, AV_LOG_DEBUG, "start VO fail for %#x!\n", s32Ret);
+    //    goto END5;
+    //}
 
     /************************************************
     step6:  VDEC bind VPSS
@@ -251,27 +251,27 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     /************************************************
     step7:  VPSS bind VO
     *************************************************/
-    for(i=0; i<VpssGrpNum; i++)
-    {
-        s32Ret = SAMPLE_COMM_VPSS_Bind_VO(i, 0, stVoConfig.VoDev, i);
-        if(s32Ret != HI_SUCCESS)
-        {
-            av_log(avctx, AV_LOG_DEBUG, "vpss bind vo fail for %#x!\n", s32Ret);
-            goto END7;
-        }
-    }
+    //for(i=0; i<VpssGrpNum; i++)
+    //{
+    //    s32Ret = SAMPLE_COMM_VPSS_Bind_VO(i, 0, stVoConfig.VoDev, i);
+    //    if(s32Ret != HI_SUCCESS)
+    //    {
+    //        av_log(avctx, AV_LOG_DEBUG, "vpss bind vo fail for %#x!\n", s32Ret);
+    //        goto END7;
+    //    }
+    //}
                          
     return 0;
 
-END7:
-    for(i=0; i<VpssGrpNum; i++)
-    {
-        s32Ret = SAMPLE_COMM_VPSS_UnBind_VO(i, 0, stVoConfig.VoDev, i);
-        if(s32Ret != HI_SUCCESS)
-        {
-            av_log(avctx, AV_LOG_DEBUG, "vpss unbind vo fail for %#x!\n", s32Ret);
-        }
-    }
+//END7:
+    //for(i=0; i<VpssGrpNum; i++)
+    //{
+    //    s32Ret = SAMPLE_COMM_VPSS_UnBind_VO(i, 0, stVoConfig.VoDev, i);
+    //    if(s32Ret != HI_SUCCESS)
+    //    {
+    //        av_log(avctx, AV_LOG_DEBUG, "vpss unbind vo fail for %#x!\n", s32Ret);
+    //    }
+    //}
 
 END6:
     for(i=0; i<VpssGrpNum; i++)
@@ -283,8 +283,8 @@ END6:
         }
     }
 
-END5:
-    SAMPLE_COMM_VO_StopVO(&stVoConfig);
+//END5:
+    //SAMPLE_COMM_VO_StopVO(&stVoConfig);
 
 END4:
     memset(abChnEnable, 0, sizeof(abChnEnable));
