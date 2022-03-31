@@ -89,6 +89,7 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     PIC_SIZE_E enDispPicSize;
     SIZE_S stDispSize;
     VB_CONFIG_S stVbConfig;
+    MPP_SYS_CONFIG_S stSysConfig;
     SAMPLE_VDEC_ATTR astSampleVdec[VDEC_MAX_CHN_NUM];
 
     VDEC_CHN_ATTR_S stVdecChnAttr;
@@ -119,17 +120,24 @@ static av_cold int hi_decode_init(AVCodecContext *avctx)
     /************************************************
     step1:  init SYS, init common VB(for VPSS and VO)
     *************************************************/
-    memset(&stVbConfig, 0, sizeof(VB_CONFIG_S));
-    stVbConfig.u32MaxPoolCnt             = 1;
-    stVbConfig.astCommPool[0].u32BlkCnt  = 10 * u32VdecChnNum;
-    stVbConfig.astCommPool[0].u64BlkSize = COMMON_GetPicBufferSize(stDispSize.u32Width, stDispSize.u32Height,
-                                                PIXEL_FORMAT_YVU_SEMIPLANAR_420, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, 0);
-    s32Ret = SAMPLE_COMM_SYS_Init(&stVbConfig);
-    if(s32Ret != HI_SUCCESS)
-    {
-        av_log(avctx, AV_LOG_DEBUG, "init sys fail for %#x!\n", s32Ret);
-        goto END1;
+    s32Ret = HI_MPI_VB_GetConfig(&stVbConfig);
+    if (s32Ret != HI_SUCCESS) {
+        s32Ret = HI_MPI_SYS_GetConfig(&stSysConfig);
+        if (s32Ret != HI_SUCCESS) {
+            memset(&stVbConfig, 0, sizeof(VB_CONFIG_S));
+            stVbConfig.u32MaxPoolCnt             = 1;
+            stVbConfig.astCommPool[0].u32BlkCnt  = 10 * u32VdecChnNum;
+            stVbConfig.astCommPool[0].u64BlkSize = COMMON_GetPicBufferSize(stDispSize.u32Width, stDispSize.u32Height,
+                                                        PIXEL_FORMAT_YVU_SEMIPLANAR_420, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, 0);
+            s32Ret = SAMPLE_COMM_SYS_Init(&stVbConfig);
+            if(s32Ret != HI_SUCCESS)
+            {
+                av_log(avctx, AV_LOG_DEBUG, "init sys fail for %#x!\n", s32Ret);
+                goto END1;
+            }
+        }
     }
+
 
     /************************************************
     step2:  init module VB or user VB(for VDEC)
