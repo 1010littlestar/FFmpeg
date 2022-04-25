@@ -64,7 +64,7 @@ static void hi_hwframe_ctx_free(void *opaque, uint8_t *data)
     }
 
     if (-1 != ctx->channel && NULL != (HI_U8 *)ctx->frame_info.stVFrame.u64PhyAddr[0]) {
-        av_log(NULL, AV_LOG_TRACE, "free VIDEO_FRAME_INFO_S\n");
+        av_log(NULL, AV_LOG_INFO, "free VIDEO_FRAME_INFO_S\n");
         HI_MPI_VPSS_ReleaseChnFrame(ctx->channel, 0, &ctx->frame_info);
     }
 
@@ -379,16 +379,6 @@ static int hi_decode(AVCodecContext *avctx, void *data,
     VIDEO_FRAME_INFO_S tmp_frame;
 
 
-    hwframe_ctx = av_mallocz(sizeof(HiMppHwFrameContext));
-    if (!hwframe_ctx) {
-        av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
-        s32Ret = AVERROR(ENOMEM);
-        return s32Ret;
-    }
-
-    hwframe_ctx->channel = channel;
-
-                 
     av_log(avctx, AV_LOG_TRACE, "hi_decode_frame: chn: %d, width:%d, height:%d, pts:%ld, size:%u, buf: %p\n", 
            channel, avctx->width, avctx->height, avpkt->pts, avpkt->size, avpkt->buf);
     if (NULL == avpkt->buf) {
@@ -412,6 +402,17 @@ static int hi_decode(AVCodecContext *avctx, void *data,
         return AVERROR(EAGAIN);
     }
 
+    /* 由于hi3559av100的VDEC输出只支持VIDEO_FORMAT_TILE_64x16格式，
+     * 所以从VPSS中获取VIDEO_FORMAT_LINEAR格式的数据用于解析
+     */
+    memset(&tmp_frame, 0, sizeof(tmp_frame));
+    tmp_frame.u32PoolId = VB_INVALID_POOLID;
+    s32Ret = HI_MPI_VPSS_GetChnFrame(channel, 0, &tmp_frame, 0);
+    if (s32Ret != HI_SUCCESS) {
+        av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VPSS_GetChnFrame fail for %#x!\n", s32Ret);
+        return AVERROR(EAGAIN);
+    }
+
     /* TODO(qiaosx): 
      * 解码使用hwaccel, 解决数据硬件地址空间与用户空间的映射, 暂时使用临时方案解决
      * */
@@ -427,26 +428,25 @@ static int hi_decode(AVCodecContext *avctx, void *data,
     frame->pkt_duration = 0;
     frame->pkt_size = -1;
 
-
-    /* 由于hi3559av100的VDEC输出只支持VIDEO_FORMAT_TILE_64x16格式，
-     * 所以从VPSS中获取VIDEO_FORMAT_LINEAR格式的数据用于解析
-     */
-    memset(&tmp_frame, 0, sizeof(tmp_frame));
-    tmp_frame.u32PoolId = VB_INVALID_POOLID;
-    s32Ret = HI_MPI_VPSS_GetChnFrame(channel, 0, &tmp_frame, 0);
-    if (s32Ret != HI_SUCCESS) {
-        av_log(avctx, AV_LOG_DEBUG, "HI_MPI_VPSS_GetChnFrame fail for %#x!\n", s32Ret);
-        return AVERROR(EAGAIN);
+    hwframe_ctx = av_mallocz(sizeof(HiMppHwFrameContext));
+    if (!hwframe_ctx) {
+        av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
+        s32Ret = AVERROR(ENOMEM);
+        return s32Ret;
     }
+
+    hwframe_ctx->channel = channel;
 
     frame->hw_frames_ctx = av_buffer_create((uint8_t*)hwframe_ctx, sizeof(HiMppHwFrameContext), hi_hwframe_ctx_free, NULL, 0);
     if (!frame->hw_frames_ctx) {
         av_log(avctx, AV_LOG_ERROR, "av malloc HiMppHwFrameContext failed\n");
+        av_free(hwframe_ctx);
+        hwframe_ctx = NULL;
         return AVERROR(ENOMEM);
     }
 
     hwframe_ctx->frame_info = tmp_frame;
-    av_log(avctx, AV_LOG_TRACE, "Got a himpp frame!\n");
+    av_log(avctx, AV_LOG_INFO, "Got a himpp frame!\n");
 
     hi_video_frame_transfer_data(hwframe_ctx, frame);
 
